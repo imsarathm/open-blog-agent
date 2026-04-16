@@ -105,6 +105,76 @@ export async function analyzeImage(provider, apiKey, base64, mediaType, prompt) 
   throw new Error(`Vision not implemented for ${provider}`);
 }
 
+/**
+ * Calls the write stage with a PDF document included as native context.
+ * Anthropic receives it as a `document` block; OpenAI as a `image_url` data URI.
+ * Groq does not support this — callers should extract text and use callLLM instead.
+ * @param {Provider} provider
+ * @param {string} apiKey
+ * @param {string} systemPrompt
+ * @param {string} userMessage
+ * @param {string} pdfBase64
+ * @returns {Promise<string>}
+ */
+export async function callLLMWithPDF(provider, apiKey, systemPrompt, userMessage, pdfBase64) {
+  if (provider === 'openai') {
+    const config = PROVIDERS[provider];
+    const response = await fetch(config.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: [
+              { type: 'image_url', image_url: { url: `data:application/pdf;base64,${pdfBase64}` } },
+              { type: 'text', text: userMessage },
+            ],
+          },
+        ],
+        max_tokens: 8192,
+      }),
+    });
+    return extractOpenAIText(response);
+  }
+
+  if (provider === 'anthropic') {
+    const config = PROVIDERS[provider];
+    const response = await fetch(config.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: config.model,
+        max_tokens: 8192,
+        system: systemPrompt,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 },
+            },
+            { type: 'text', text: userMessage },
+          ],
+        }],
+      }),
+    });
+    return extractAnthropicText(response);
+  }
+
+  // Groq fallback — should not be called with pdfBase64
+  return callLLM(provider, apiKey, systemPrompt, userMessage);
+}
+
 // ── Internal callers ──────────────────────────────────────────────────────────
 
 async function callOpenAICompat(config, apiKey, systemPrompt, userMessage) {

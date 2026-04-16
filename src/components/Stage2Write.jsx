@@ -1,18 +1,19 @@
 import { useState } from 'react';
-import { callLLM } from '../api/llm.js';
+import { callLLM, callLLMWithPDF } from '../api/llm.js';
 import { WRITE_SYSTEM_PROMPT } from '../prompts.js';
 import Spinner from './Spinner.jsx';
 import OutputBox from './OutputBox.jsx';
 import CopyButton from './CopyButton.jsx';
 
 export default function Stage2Write({ provider, apiKey, stage1Inputs, mode, rubricFeedback, onComplete, onBack }) {
-  const { title, primaryKeyword, secondaryKeywords, targetAudience, styleReference, brief } = stage1Inputs;
+  const { title, primaryKeyword, secondaryKeywords, targetAudience, styleReference, pdfBase64, brief } = stage1Inputs;
   const [loading, setLoading] = useState(false);
   const [blogOutput, setBlogOutput] = useState('');
   const [error, setError] = useState('');
 
-  // Auto-run if coming back from Stage 3 with feedback
   const isFixMode = mode === 'fix';
+  // Use native PDF path when provider supports it and a PDF was uploaded
+  const usePdfNative = !isFixMode && pdfBase64 && (provider === 'openai' || provider === 'anthropic');
 
   async function handleWrite() {
     setError('');
@@ -27,11 +28,19 @@ export default function Stage2Write({ provider, apiKey, stage1Inputs, mode, rubr
       const styleBlock = styleReference
         ? ` | Style Reference Blog (analyse before writing): ${styleReference}`
         : '';
-      userMessage = `Research Brief: ${brief} | Title: ${title} | Primary Keyword: ${primaryKeyword} | Secondary Keywords: ${secondaryKeywords} | Target audience: ${targetAudience}${styleBlock} | MODE: WRITE`;
+      const pdfNote = usePdfNative
+        ? ' | A reference blog PDF is attached. Analyse its structure and style as instructed.'
+        : '';
+      userMessage =
+        `Research Brief: ${brief} | Title: ${title} | Primary Keyword: ${primaryKeyword} | ` +
+        `Secondary Keywords: ${secondaryKeywords} | Target audience: ${targetAudience}` +
+        `${styleBlock}${pdfNote} | MODE: WRITE`;
     }
 
     try {
-      const result = await callLLM(provider, apiKey, WRITE_SYSTEM_PROMPT, userMessage);
+      const result = usePdfNative
+        ? await callLLMWithPDF(provider, apiKey, WRITE_SYSTEM_PROMPT, userMessage, pdfBase64)
+        : await callLLM(provider, apiKey, WRITE_SYSTEM_PROMPT, userMessage);
       setBlogOutput(result);
     } catch (err) {
       setError(err.message || 'Something went wrong. Check your API key and try again.');

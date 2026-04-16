@@ -1,14 +1,47 @@
 import { useState } from 'react';
-import { callLLM, analyzeImage, PROVIDERS } from '../api/llm.js';
-import { htmlToMarkdown } from '../api/htmlToMarkdown.js';
+import { callLLM } from '../api/llm.js';
 import { RESEARCH_SYSTEM_PROMPT } from '../prompts.js';
 import Spinner from './Spinner.jsx';
 import OutputBox from './OutputBox.jsx';
 
-const VISION_PROMPT =
-  "Analyse this blog screenshot's exact structure: count and note every H1, H2, H3 heading, " +
-  'bullet point patterns, paragraph lengths, section count, CTA style. Use this as the exact ' +
-  'style template to mirror — same number of sections, same heading hierarchy, same bullet usage.';
+const WORKER_SRC =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+/**
+ * Extracts plain text from a PDF File using pdf.js.
+ * Preserves line breaks between text blocks on different vertical positions.
+ * @param {File} file
+ * @returns {Promise<string>}
+ */
+async function extractPdfText(file) {
+  const pdfjsLib = window.pdfjsLib;
+  if (!pdfjsLib) throw new Error('pdf.js failed to load — please refresh the page.');
+
+  pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER_SRC;
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const pageTexts = [];
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    let lastY = null;
+    const parts = [];
+
+    for (const item of content.items) {
+      if (lastY !== null && Math.abs(item.transform[5] - lastY) > 5) {
+        parts.push('\n');
+      }
+      parts.push(item.str);
+      lastY = item.transform[5];
+    }
+
+    pageTexts.push(parts.join(''));
+  }
+
+  return pageTexts.join('\n\n');
+}
 
 export default function Stage1Research({ provider, apiKey, onComplete }) {
   const [title, setTitle] = useState('');
@@ -16,96 +49,69 @@ export default function Stage1Research({ provider, apiKey, onComplete }) {
   const [secondaryKeywords, setSecondaryKeywords] = useState('');
   const [targetAudience, setTargetAudience] = useState('');
 
-  // Reference blog
-  const [refTab, setRefTab] = useState('url');
-  const [refUrl, setRefUrl] = useState('');
-  const [refPaste, setRefPaste] = useState('');
-  const [refImage, setRefImage] = useState(null); // { base64, mediaType, preview }
+  // PDF reference blog
+  const [pdfFile, setPdfFile] = useState(null);
+  const [pdfBase64, setPdfBase64] = useState('');
+  const [pdfError, setPdfError] = useState('');
+  const [resolvedStyleRef, setResolvedStyleRef] = useState('');
 
-  // Status
-  const [fetchingRef, setFetchingRef] = useState(false);
-  const [fetchStatus, setFetchStatus] = useState('');
-  const [refetchError, setRefetchError] = useState('');
-  const [resolvedRef, setResolvedRef] = useState('');
+  // Stage status
+  const [extractingPdf, setExtractingPdf] = useState(false);
   const [loading, setLoading] = useState(false);
   const [brief, setBrief] = useState('');
   const [error, setError] = useState('');
 
-  const supportsVision = PROVIDERS[provider]?.supportsVision;
-  const activeTab = (!supportsVision && refTab === 'screenshot') ? 'url' : refTab;
+  const isBusy = extractingPdf || loading;
+  // Groq gets text extraction; OpenAI and Anthropic receive the raw PDF base64
+  const useTextExtraction = provider === 'groq';
 
-  const isBusy = fetchingRef || loading;
-
-  function handleImageUpload(e) {
+  function handlePdfUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
+
+    if (file.type !== 'application/pdf') {
+      setPdfError('Please upload a PDF file only.');
+      setPdfFile(null);
+      setPdfBase64('');
+      return;
+    }
+
+    setPdfFile(file);
+    setPdfError('');
+    setResolvedStyleRef('');
+
+    // Pre-compute base64 now so it's ready for OpenAI/Anthropic at write time
     const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result;
-      setRefImage({
-        base64: dataUrl.split(',')[1],
-        mediaType: file.type || 'image/jpeg',
-        preview: dataUrl,
-      });
-      setRefetchError('');
-    };
+    reader.onload = () => setPdfBase64(reader.result.split(',')[1]);
     reader.readAsDataURL(file);
-  }
-
-  async function resolveStyleReference() {
-    if (activeTab === 'url' && refUrl.trim()) {
-      setFetchStatus('Fetching reference blog...');
-      setFetchingRef(true);
-      try {
-        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(refUrl.trim())}`;
-        const res = await fetch(proxyUrl);
-        if (!res.ok) throw new Error('Proxy request failed');
-        const json = await res.json();
-        if (!json.contents) throw new Error('Empty proxy response');
-        const markdown = htmlToMarkdown(json.contents);
-        if (!markdown) throw new Error('No readable text found at this URL');
-        setFetchingRef(false);
-        return markdown;
-      } catch {
-        setRefetchError('Could not fetch this URL. Please paste the blog text directly instead.');
-        setFetchingRef(false);
-        return null;
-      }
-    }
-
-    if (activeTab === 'paste' && refPaste.trim()) {
-      return refPaste.trim();
-    }
-
-    if (activeTab === 'screenshot' && refImage) {
-      setFetchStatus('Analysing screenshot...');
-      setFetchingRef(true);
-      try {
-        const result = await analyzeImage(provider, apiKey, refImage.base64, refImage.mediaType, VISION_PROMPT);
-        setFetchingRef(false);
-        return result;
-      } catch (err) {
-        setRefetchError(`Could not analyse screenshot: ${err.message}`);
-        setFetchingRef(false);
-        return null;
-      }
-    }
-
-    return '';
   }
 
   async function handleResearch(e) {
     e.preventDefault();
     setError('');
-    setRefetchError('');
     setBrief('');
 
-    const styleRef = await resolveStyleReference();
-    if (styleRef === null) return;
-    setResolvedRef(styleRef);
+    // For Groq: extract text from PDF now so it goes into the style reference
+    if (pdfFile && useTextExtraction) {
+      setExtractingPdf(true);
+      try {
+        const text = await extractPdfText(pdfFile);
+        setResolvedStyleRef(text);
+      } catch (err) {
+        setError(`Could not read PDF: ${err.message}`);
+        setExtractingPdf(false);
+        return;
+      }
+      setExtractingPdf(false);
+    } else {
+      // OpenAI/Anthropic: PDF will be sent as base64 document in Stage 2
+      setResolvedStyleRef('');
+    }
 
     setLoading(true);
-    const userMessage = `Title: ${title} | Primary keyword: ${primaryKeyword} | Secondary keywords: ${secondaryKeywords} | Target audience: ${targetAudience}`;
+    const userMessage =
+      `Title: ${title} | Primary keyword: ${primaryKeyword} | ` +
+      `Secondary keywords: ${secondaryKeywords} | Target audience: ${targetAudience}`;
 
     try {
       const result = await callLLM(provider, apiKey, RESEARCH_SYSTEM_PROMPT, userMessage);
@@ -118,7 +124,16 @@ export default function Stage1Research({ provider, apiKey, onComplete }) {
   }
 
   function handleProceed() {
-    onComplete({ title, primaryKeyword, secondaryKeywords, targetAudience, styleReference: resolvedRef, brief });
+    onComplete({
+      title,
+      primaryKeyword,
+      secondaryKeywords,
+      targetAudience,
+      styleReference: resolvedStyleRef,
+      // pdfBase64 only forwarded for providers that consume it natively
+      pdfBase64: useTextExtraction ? '' : pdfBase64,
+      brief,
+    });
   }
 
   const canSubmit = title.trim() && primaryKeyword.trim() && targetAudience.trim() && apiKey;
@@ -186,88 +201,31 @@ export default function Stage1Research({ provider, apiKey, onComplete }) {
           />
         </div>
 
-        {/* Reference blog */}
         <div className="form-group">
-          <label>Reference blog for style</label>
+          <label htmlFor="ref-pdf">Reference blog for style</label>
           <small className="field-hint">
-            Agent will match its length, structure, and tone. Provide one of the options below.
+            Open any blog → Cmd+P (Mac) or Ctrl+P (Windows) → Save as PDF → upload here
           </small>
-
-          <div className="ref-tabs">
-            <button
-              type="button"
-              className={`ref-tab ${activeTab === 'url' ? 'ref-tab-active' : ''}`}
-              onClick={() => { setRefTab('url'); setRefetchError(''); }}
+          <div className="pdf-upload-area">
+            <input
+              id="ref-pdf"
+              type="file"
+              accept=".pdf"
+              onChange={handlePdfUpload}
               disabled={isBusy}
+              className="pdf-file-input"
+            />
+            <label
+              htmlFor="ref-pdf"
+              className={`pdf-upload-label ${isBusy ? 'pdf-upload-disabled' : ''}`}
             >
-              URL
-            </button>
-            <button
-              type="button"
-              className={`ref-tab ${activeTab === 'paste' ? 'ref-tab-active' : ''}`}
-              onClick={() => { setRefTab('paste'); setRefetchError(''); }}
-              disabled={isBusy}
-            >
-              Paste text
-            </button>
-            {supportsVision && (
-              <button
-                type="button"
-                className={`ref-tab ${activeTab === 'screenshot' ? 'ref-tab-active' : ''}`}
-                onClick={() => { setRefTab('screenshot'); setRefetchError(''); }}
-                disabled={isBusy}
-              >
-                Upload screenshot
-              </button>
+              {pdfFile ? 'Change PDF' : 'Choose PDF'}
+            </label>
+            {pdfFile && !pdfError && (
+              <p className="pdf-loaded">Reference blog loaded: {pdfFile.name}</p>
             )}
-          </div>
-
-          <div className="ref-tab-content">
-            {activeTab === 'url' && (
-              <input
-                type="url"
-                value={refUrl}
-                onChange={(e) => { setRefUrl(e.target.value); setRefetchError(''); }}
-                placeholder="https://example.com/blog-post"
-                disabled={isBusy}
-              />
-            )}
-
-            {activeTab === 'paste' && (
-              <textarea
-                value={refPaste}
-                onChange={(e) => setRefPaste(e.target.value)}
-                placeholder="Paste reference blog text here..."
-                rows={8}
-                disabled={isBusy}
-              />
-            )}
-
-            {activeTab === 'screenshot' && (
-              <div className="ref-upload-area">
-                <input
-                  id="ref-screenshot"
-                  type="file"
-                  accept="image/*"
-                  onChange={handleImageUpload}
-                  disabled={isBusy}
-                  className="ref-file-input"
-                />
-                <label htmlFor="ref-screenshot" className={`ref-upload-label ${isBusy ? 'ref-upload-disabled' : ''}`}>
-                  {refImage ? 'Change image' : 'Choose screenshot'}
-                </label>
-                {refImage && (
-                  <img
-                    src={refImage.preview}
-                    alt="Reference blog screenshot preview"
-                    className="ref-image-preview"
-                  />
-                )}
-              </div>
-            )}
-
-            {refetchError && (
-              <p className="ref-fetch-error" role="alert">{refetchError}</p>
+            {pdfError && (
+              <p className="pdf-error" role="alert">{pdfError}</p>
             )}
           </div>
         </div>
@@ -285,14 +243,14 @@ export default function Stage1Research({ provider, apiKey, onComplete }) {
         </button>
       </form>
 
-      {fetchingRef && (
+      {extractingPdf && (
         <div className="fetch-status">
           <Spinner />
-          <p className="fetch-status-text">{fetchStatus}</p>
+          <p className="fetch-status-text">Extracting text from PDF...</p>
         </div>
       )}
 
-      {loading && !fetchingRef && <Spinner />}
+      {loading && !extractingPdf && <Spinner />}
 
       {error && (
         <div className="error-box" role="alert">
