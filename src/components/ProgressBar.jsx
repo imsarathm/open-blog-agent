@@ -1,7 +1,8 @@
 const STAGES = [
   { number: 1, label: 'Research' },
   { number: 2, label: 'Write' },
-  { number: 3, label: 'Evaluate' },
+  { number: 3, label: 'Fact Check' },
+  { number: 4, label: 'Evaluate' },
 ];
 
 export default function ProgressBar({ currentStage }) {

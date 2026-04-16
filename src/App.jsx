@@ -2,6 +2,7 @@ import { useState } from 'react';
 import ProgressBar from './components/ProgressBar.jsx';
 import Stage1Research from './components/Stage1Research.jsx';
 import Stage2Write from './components/Stage2Write.jsx';
+import Stage3FactCheck from './components/Stage3FactCheck.jsx';
 import Stage3Evaluate from './components/Stage3Evaluate.jsx';
 import { PROVIDERS } from './api/llm.js';
 import './App.css';
@@ -81,7 +82,6 @@ export default function App() {
   function handleProviderChange(newProvider) {
     setProvider(newProvider);
     localStorage.setItem(STORAGE_KEY_PROVIDER, newProvider);
-    // Clear key when switching providers to avoid cross-provider key confusion
     setApiKey('');
     localStorage.setItem(STORAGE_KEY_API_KEY, '');
   }
@@ -107,6 +107,20 @@ export default function App() {
     setCurrentStage(1);
   }
 
+  // From Stage 3 FactCheck — sends false/unverified claims back to Stage 2
+  function handleFactCheckFix({ rubricFeedback: feedback, previousBlog }) {
+    setRubricFeedback(feedback);
+    setStage1Inputs((prev) => ({ ...prev, previousBlog }));
+    setStage2Mode('fix');
+    setCurrentStage(2);
+  }
+
+  // From Stage 3 FactCheck — blog is clean, proceed to Stage 4
+  function handleFactCheckEvaluate() {
+    setCurrentStage(4);
+  }
+
+  // From Stage 4 Evaluate — send rubric feedback back to Stage 2
   function handleFixBlog({ rubricFeedback: feedback, previousBlog }) {
     setRubricFeedback(feedback);
     setStage1Inputs((prev) => ({ ...prev, previousBlog }));
@@ -160,6 +174,16 @@ export default function App() {
         )}
 
         {currentStage === 3 && (
+          <Stage3FactCheck
+            provider={provider}
+            apiKey={apiKey}
+            blogOutput={blogOutput}
+            onFix={handleFactCheckFix}
+            onEvaluate={handleFactCheckEvaluate}
+          />
+        )}
+
+        {currentStage === 4 && (
           <Stage3Evaluate
             provider={provider}
             apiKey={apiKey}

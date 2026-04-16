@@ -1,47 +1,98 @@
 import { useState } from 'react';
-import { callLLM } from '../api/llm.js';
+import { callLLM, analyzeImage, PROVIDERS } from '../api/llm.js';
+import { htmlToMarkdown } from '../api/htmlToMarkdown.js';
 import { RESEARCH_SYSTEM_PROMPT } from '../prompts.js';
 import Spinner from './Spinner.jsx';
 import OutputBox from './OutputBox.jsx';
 
-/**
- * Fetches a URL through the allorigins proxy and returns clean plain text.
- * @param {string} url
- * @returns {Promise<string>}
- */
-async function fetchRefFromUrl(url) {
-  const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-  const res = await fetch(proxyUrl);
-  if (!res.ok) throw new Error('Proxy request failed');
-
-  const json = await res.json();
-  if (!json.contents) throw new Error('Empty proxy response');
-
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(json.contents, 'text/html');
-  doc.querySelectorAll('script, style, noscript, nav, footer, header, aside').forEach((el) =>
-    el.remove()
-  );
-
-  const text = (doc.body?.innerText || doc.body?.textContent || '').trim();
-  if (!text) throw new Error('No readable text found at this URL');
-  return text;
-}
+const VISION_PROMPT =
+  "Analyse this blog screenshot's exact structure: count and note every H1, H2, H3 heading, " +
+  'bullet point patterns, paragraph lengths, section count, CTA style. Use this as the exact ' +
+  'style template to mirror — same number of sections, same heading hierarchy, same bullet usage.';
 
 export default function Stage1Research({ provider, apiKey, onComplete }) {
   const [title, setTitle] = useState('');
   const [primaryKeyword, setPrimaryKeyword] = useState('');
   const [secondaryKeywords, setSecondaryKeywords] = useState('');
   const [targetAudience, setTargetAudience] = useState('');
+
+  // Reference blog
+  const [refTab, setRefTab] = useState('url');
   const [refUrl, setRefUrl] = useState('');
-  const [styleReference, setStyleReference] = useState('');
+  const [refPaste, setRefPaste] = useState('');
+  const [refImage, setRefImage] = useState(null); // { base64, mediaType, preview }
+
+  // Status
   const [fetchingRef, setFetchingRef] = useState(false);
+  const [fetchStatus, setFetchStatus] = useState('');
   const [refetchError, setRefetchError] = useState('');
+  const [resolvedRef, setResolvedRef] = useState('');
   const [loading, setLoading] = useState(false);
   const [brief, setBrief] = useState('');
   const [error, setError] = useState('');
 
+  const supportsVision = PROVIDERS[provider]?.supportsVision;
+  const activeTab = (!supportsVision && refTab === 'screenshot') ? 'url' : refTab;
+
   const isBusy = fetchingRef || loading;
+
+  function handleImageUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      setRefImage({
+        base64: dataUrl.split(',')[1],
+        mediaType: file.type || 'image/jpeg',
+        preview: dataUrl,
+      });
+      setRefetchError('');
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function resolveStyleReference() {
+    if (activeTab === 'url' && refUrl.trim()) {
+      setFetchStatus('Fetching reference blog...');
+      setFetchingRef(true);
+      try {
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(refUrl.trim())}`;
+        const res = await fetch(proxyUrl);
+        if (!res.ok) throw new Error('Proxy request failed');
+        const json = await res.json();
+        if (!json.contents) throw new Error('Empty proxy response');
+        const markdown = htmlToMarkdown(json.contents);
+        if (!markdown) throw new Error('No readable text found at this URL');
+        setFetchingRef(false);
+        return markdown;
+      } catch {
+        setRefetchError('Could not fetch this URL. Please paste the blog text directly instead.');
+        setFetchingRef(false);
+        return null;
+      }
+    }
+
+    if (activeTab === 'paste' && refPaste.trim()) {
+      return refPaste.trim();
+    }
+
+    if (activeTab === 'screenshot' && refImage) {
+      setFetchStatus('Analysing screenshot...');
+      setFetchingRef(true);
+      try {
+        const result = await analyzeImage(provider, apiKey, refImage.base64, refImage.mediaType, VISION_PROMPT);
+        setFetchingRef(false);
+        return result;
+      } catch (err) {
+        setRefetchError(`Could not analyse screenshot: ${err.message}`);
+        setFetchingRef(false);
+        return null;
+      }
+    }
+
+    return '';
+  }
 
   async function handleResearch(e) {
     e.preventDefault();
@@ -49,19 +100,9 @@ export default function Stage1Research({ provider, apiKey, onComplete }) {
     setRefetchError('');
     setBrief('');
 
-    let resolvedRef = styleReference;
-
-    if (refUrl.trim()) {
-      setFetchingRef(true);
-      try {
-        resolvedRef = await fetchRefFromUrl(refUrl.trim());
-      } catch {
-        setRefetchError('Could not fetch this URL. Please paste the blog text directly instead.');
-        setFetchingRef(false);
-        return;
-      }
-      setFetchingRef(false);
-    }
+    const styleRef = await resolveStyleReference();
+    if (styleRef === null) return;
+    setResolvedRef(styleRef);
 
     setLoading(true);
     const userMessage = `Title: ${title} | Primary keyword: ${primaryKeyword} | Secondary keywords: ${secondaryKeywords} | Target audience: ${targetAudience}`;
@@ -69,8 +110,6 @@ export default function Stage1Research({ provider, apiKey, onComplete }) {
     try {
       const result = await callLLM(provider, apiKey, RESEARCH_SYSTEM_PROMPT, userMessage);
       setBrief(result);
-      // Stash resolved ref so handleProceed always has the fetched text
-      setStyleReference(resolvedRef);
     } catch (err) {
       setError(err.message || 'Something went wrong. Check your API key and try again.');
     } finally {
@@ -79,7 +118,7 @@ export default function Stage1Research({ provider, apiKey, onComplete }) {
   }
 
   function handleProceed() {
-    onComplete({ title, primaryKeyword, secondaryKeywords, targetAudience, styleReference, brief });
+    onComplete({ title, primaryKeyword, secondaryKeywords, targetAudience, styleReference: resolvedRef, brief });
   }
 
   const canSubmit = title.trim() && primaryKeyword.trim() && targetAudience.trim() && apiKey;
@@ -147,41 +186,90 @@ export default function Stage1Research({ provider, apiKey, onComplete }) {
           />
         </div>
 
+        {/* Reference blog */}
         <div className="form-group">
           <label>Reference blog for style</label>
           <small className="field-hint">
-            Agent will match its length, structure, and tone. Provide a URL or paste the text — one is enough.
+            Agent will match its length, structure, and tone. Provide one of the options below.
           </small>
 
-          <input
-            id="ref-url"
-            type="url"
-            value={refUrl}
-            onChange={(e) => {
-              setRefUrl(e.target.value);
-              setRefetchError('');
-            }}
-            placeholder="https://example.com/blog-post"
-            disabled={isBusy}
-            className="ref-url-input"
-          />
-
-          {refetchError && (
-            <p className="ref-fetch-error" role="alert">{refetchError}</p>
-          )}
-
-          <div className="ref-or-divider">
-            <span>or paste below</span>
+          <div className="ref-tabs">
+            <button
+              type="button"
+              className={`ref-tab ${activeTab === 'url' ? 'ref-tab-active' : ''}`}
+              onClick={() => { setRefTab('url'); setRefetchError(''); }}
+              disabled={isBusy}
+            >
+              URL
+            </button>
+            <button
+              type="button"
+              className={`ref-tab ${activeTab === 'paste' ? 'ref-tab-active' : ''}`}
+              onClick={() => { setRefTab('paste'); setRefetchError(''); }}
+              disabled={isBusy}
+            >
+              Paste text
+            </button>
+            {supportsVision && (
+              <button
+                type="button"
+                className={`ref-tab ${activeTab === 'screenshot' ? 'ref-tab-active' : ''}`}
+                onClick={() => { setRefTab('screenshot'); setRefetchError(''); }}
+                disabled={isBusy}
+              >
+                Upload screenshot
+              </button>
+            )}
           </div>
 
-          <textarea
-            id="style-reference"
-            value={styleReference}
-            onChange={(e) => setStyleReference(e.target.value)}
-            placeholder="Paste reference blog text here..."
-            rows={8}
-            disabled={isBusy}
-          />
+          <div className="ref-tab-content">
+            {activeTab === 'url' && (
+              <input
+                type="url"
+                value={refUrl}
+                onChange={(e) => { setRefUrl(e.target.value); setRefetchError(''); }}
+                placeholder="https://example.com/blog-post"
+                disabled={isBusy}
+              />
+            )}
+
+            {activeTab === 'paste' && (
+              <textarea
+                value={refPaste}
+                onChange={(e) => setRefPaste(e.target.value)}
+                placeholder="Paste reference blog text here..."
+                rows={8}
+                disabled={isBusy}
+              />
+            )}
+
+            {activeTab === 'screenshot' && (
+              <div className="ref-upload-area">
+                <input
+                  id="ref-screenshot"
+                  type="file"
+                  accept="image/*"
+                  onChange={handleImageUpload}
+                  disabled={isBusy}
+                  className="ref-file-input"
+                />
+                <label htmlFor="ref-screenshot" className={`ref-upload-label ${isBusy ? 'ref-upload-disabled' : ''}`}>
+                  {refImage ? 'Change image' : 'Choose screenshot'}
+                </label>
+                {refImage && (
+                  <img
+                    src={refImage.preview}
+                    alt="Reference blog screenshot preview"
+                    className="ref-image-preview"
+                  />
+                )}
+              </div>
+            )}
+
+            {refetchError && (
+              <p className="ref-fetch-error" role="alert">{refetchError}</p>
+            )}
+          </div>
         </div>
 
         {!apiKey && (
@@ -200,7 +288,7 @@ export default function Stage1Research({ provider, apiKey, onComplete }) {
       {fetchingRef && (
         <div className="fetch-status">
           <Spinner />
-          <p className="fetch-status-text">Fetching reference blog...</p>
+          <p className="fetch-status-text">{fetchStatus}</p>
         </div>
       )}
 
