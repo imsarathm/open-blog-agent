@@ -1,10 +1,10 @@
 const GEMINI_MODELS = [
-  'gemini-2.0-flash',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash-lite',
   'gemini-1.5-flash',
-  'gemini-1.5-flash-8b',
 ];
 
-const GEMINI_VISION_MODEL = 'gemini-2.0-flash';
+const GEMINI_VISION_MODEL = 'gemini-2.5-flash';
 
 /**
  * Calls the Gemini API with a system prompt and user message.

@@ -28,9 +28,9 @@ export const PROVIDERS = {
     supportsVision: true,
   },
   gemini: {
-    label: 'Google — Gemini 2.0 Flash',
+    label: 'Google — Gemini 2.5 Flash',
     hint: 'Free key at aistudio.google.com',
-    model: 'gemini-2.0-flash',
+    model: 'gemini-2.5-flash',
     type: 'gemini',
     supportsVision: true,
   },
