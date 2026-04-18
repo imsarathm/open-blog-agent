@@ -1,4 +1,6 @@
-/** @typedef {'groq' | 'openai' | 'anthropic'} Provider */
+import { callGemini, analyzeImageGemini, callGeminiWithPDF } from './gemini.js';
+
+/** @typedef {'groq' | 'openai' | 'anthropic' | 'gemini'} Provider */
 
 export const PROVIDERS = {
   groq: {
@@ -25,6 +27,13 @@ export const PROVIDERS = {
     type: 'anthropic',
     supportsVision: true,
   },
+  gemini: {
+    label: 'Google — Gemini 2.0 Flash',
+    hint: 'Free key at aistudio.google.com',
+    model: 'gemini-2.0-flash',
+    type: 'gemini',
+    supportsVision: true,
+  },
 };
 
 /**
@@ -41,6 +50,7 @@ export async function callLLM(provider, apiKey, systemPrompt, userMessage) {
 
   if (config.type === 'openai')     return callOpenAICompat(config, apiKey, systemPrompt, userMessage);
   if (config.type === 'anthropic')  return callAnthropic(config, apiKey, systemPrompt, userMessage);
+  if (config.type === 'gemini')     return callGemini(apiKey, systemPrompt, userMessage);
   throw new Error(`Unsupported provider type: ${config.type}`);
 }
 
@@ -100,6 +110,10 @@ export async function analyzeImage(provider, apiKey, base64, mediaType, prompt) 
       }),
     });
     return extractAnthropicText(response);
+  }
+
+  if (provider === 'gemini') {
+    return analyzeImageGemini(apiKey, base64, mediaType, prompt);
   }
 
   throw new Error(`Vision not implemented for ${provider}`);
@@ -169,6 +183,10 @@ export async function callLLMWithPDF(provider, apiKey, systemPrompt, userMessage
       }),
     });
     return extractAnthropicText(response);
+  }
+
+  if (provider === 'gemini') {
+    return callGeminiWithPDF(apiKey, systemPrompt, userMessage, pdfBase64);
   }
 
   // Groq fallback — should not be called with pdfBase64
